@@ -34,16 +34,39 @@ Phase90Editor::Phase90Editor (Phase90Processor& p)
     setSize (roundToInt (h0 * aspect), h0);
 
     tickLevel = footLevel = proc.isOn() ? 1.0f : 0.0f;
-    startTimerHz (60);
+    startTimerHz (30);                      // 30 i/s suffisent pour des LED et un potard fluides
 }
 
 Phase90Editor::~Phase90Editor() { stopTimer(); }
 
 //==============================================================================
+// Anti-gel de la fenêtre (Windows) : JUCE 8 dessine par défaut avec Direct2D (carte graphique).
+// Avec certains pilotes (Intel notamment) la fenêtre du plugin cesse de se rafraîchir alors que
+// le DAW continue de tourner. Le moteur logiciel est stable partout et largement assez rapide ici.
+void Phase90Editor::useSoftwareRenderer()
+{
+   #if JUCE_WINDOWS
+    if (auto* peer = getPeer())
+    {
+        int sw = peer->getAvailableRenderingEngines().indexOf ("Software Renderer");
+        if (sw < 0) sw = 0;
+        if (peer->getCurrentRenderingEngine() != sw)
+            peer->setCurrentRenderingEngine (sw);
+    }
+   #endif
+}
+
+void Phase90Editor::parentHierarchyChanged()
+{
+    useSoftwareRenderer();
+}
+
 void Phase90Editor::resized()
 {
     const int minW = roundToInt (p9ui::heightDefault * (double) art::W / (double) art::H);
-    if (getHeight() < p9ui::heightDefault || getWidth() < minW) { setSize (minW, p9ui::heightDefault); return; }
+    // tolérance de 2 px : avec la mise à l'échelle Windows (125 %, 150 %…) l'hôte arrondit les tailles ;
+    // sans marge, les deux se renvoient la fenêtre en boucle
+    if (getHeight() < p9ui::heightDefault - 2 || getWidth() < minW - 2) { setSize (minW, p9ui::heightDefault); return; }
     proc.uiHeight.store (getHeight());
     rebuildScaledImages();
 }
@@ -135,7 +158,7 @@ void Phase90Editor::timerCallback()
     const bool follow = proc.apvts.getRawParameterValue ("ticklfo")->load() > 0.5f;
     const float lfo = proc.lfoVisual.load();                  // 0 = haut du balayage, 1 = bas
     const float tickTarget = on ? (follow ? 0.40f + 0.60f * (1.0f - lfo) : 1.0f) : 0.0f;
-    const float k = 0.35f;   // LED : allumage rapide mais pas instantané
+    const float k = 0.5775f;   // LED : allumage rapide mais pas instantané (= 0,35 par image à 60 i/s, même durée à 30 i/s)
     tickLevel += (tickTarget - tickLevel) * k;
     footLevel += ((on ? 1.0f : 0.0f) - footLevel) * k;
 
@@ -143,7 +166,7 @@ void Phase90Editor::timerCallback()
     const int sd = proc.syncState();
     const float ph = proc.lfoPhaseVisual.load();
     const float syncTarget = sd > 0 ? 0.30f + 0.70f * std::pow (1.0f - ph, 2.2f) : 0.0f;
-    syncLevel += (syncTarget - syncLevel) * 0.5f;
+    syncLevel += (syncTarget - syncLevel) * 0.75f;   // = 0,5 par image à 60 i/s, même durée à 30 i/s
 
     // un réglage a changé (souris, MIDI, automation du DAW, preset) -> la ligne d'état apparaît
     const float sp = proc.getSpeed();
@@ -166,12 +189,40 @@ void Phase90Editor::timerCallback()
         flash (String (learned == 0 ? "FOOTSWITCH" : learned == 1 ? "SPEED" : learned == 2 ? "SCRIPT/BLOCK" : "SYNC") + " = CC " + String (cc), 2.0);
     }
 
-    // on ne redessine que ce qui bouge (graduations + potard, footswitch, ligne d'état)
-    const float s = scale();
-    repaint (Rectangle<float> (art::ticksX * s, art::ticksY * s, 580.0f * s, 580.0f * s).toNearestInt().expanded (2));
-    repaint (Rectangle<float> (art::footX * s, art::footY * s, 400.0f * s, 400.0f * s).toNearestInt().expanded (2));
-    repaint (toWin ({ art::statusX - 360.0f, art::statusY - 40.0f, 720.0f, 80.0f }).toNearestInt());
-    repaint (toWin ({ art::sync.x - 110.0f, art::sync.y - 90.0f, 220.0f, 200.0f }).toNearestInt());
+    useSoftwareRenderer();   // au cas où la fenêtre a été recréée par l'hôte (changement d'écran, d'échelle…)
+
+    // on ne redessine une zone que si ce qu'elle affiche a vraiment changé (zéro travail au repos)
+    auto changed = [] (float& drawn, float now, float eps) { if (std::abs (drawn - now) < eps) return false; drawn = now; return true; };
+    auto zone = [this] (juce::Rectangle<float> r) { repaint (toWin (r).toNearestInt().expanded (2)); };
+
+    // graduations + potard (le potard est entièrement dans la zone des graduations)
+    const bool tickChanged  = changed (drawnTick, tickLevel, 0.002f);
+    const bool speedChanged = changed (drawnSpeed, sp, 1.0e-4f);      // seuil fin : l'index du potard doit suivre au pixel près
+    if (tickChanged || speedChanged)
+        zone ({ art::ticksX, art::ticksY, 580.0f, 580.0f });
+
+    // footswitch (anneau lumineux + chapeau enfoncé)
+    const bool footChanged = changed (drawnFoot, footLevel, 0.002f) || footDown != drawnFootDown;
+    drawnFootDown = footDown;
+    if (footChanged)
+        zone ({ art::footX, art::footY, 400.0f, 400.0f });
+
+    // ligne d'état (texte + fondu)
+    const String st = statusText();
+    const bool alphaChanged = changed (drawnStatusAlpha, st.isEmpty() ? 0.0f : statusAlpha(), 0.002f);
+    if (st != drawnStatus || alphaChanged)
+    {
+        drawnStatus = st;
+        zone ({ art::statusX - 360.0f, art::statusY - 40.0f, 720.0f, 80.0f });
+    }
+
+    // bouton SYNC (anneau qui pulse au tempo + inscription)
+    const bool syncLevelChanged = changed (drawnSyncLevel, syncLevel, 0.002f);
+    if (syncLevelChanged || sd != drawnSyncState)
+    {
+        drawnSyncState = sd;
+        zone ({ art::sync.x - 110.0f, art::sync.y - 90.0f, 220.0f, 200.0f });
+    }
 }
 
 //==============================================================================

@@ -36,6 +36,7 @@ public:
 
     void paint (juce::Graphics&) override;
     void resized() override;
+    void parentHierarchyChanged() override;
 
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
@@ -46,6 +47,7 @@ public:
 
 private:
     void timerCallback() override;
+    void useSoftwareRenderer();
     float scale() const { return (float) getWidth() / art::W; }
     juce::Point<float> toArt (juce::Point<float> p) const { return p / scale(); }
     juce::Rectangle<float> toWin (juce::Rectangle<float> r) const { const float s = scale(); return { r.getX() * s, r.getY() * s, r.getWidth() * s, r.getHeight() * s }; }
@@ -84,6 +86,12 @@ private:
     juce::Point<float> dragStart;
     juce::String flashText;
     double flashUntil = 0.0;
+
+    // dernier état réellement dessiné : on ne redessine une zone que si elle a changé
+    float drawnTick = -1.0f, drawnSpeed = -1.0f, drawnFoot = -1.0f, drawnSyncLevel = -1.0f, drawnStatusAlpha = -1.0f;
+    int drawnSyncState = -1;
+    bool drawnFootDown = false;
+    juce::String drawnStatus;
 
     std::unique_ptr<juce::AlertWindow> nameDialog;
 
