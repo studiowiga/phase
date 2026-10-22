@@ -3,7 +3,7 @@
 Phaser analogique **VST3** (Windows 64 bits + macOS universel Apple Silicon/Intel) au format pédale simple,
 modélisé composant par composant sur le **MXR Phase 90** : 4 cellules passe-tout à JFET 2N5952,
 LFO triangle (trigger de Schmitt + intégrateur), mélange sec/traité 50/50, résistance de réinjection R28
-(versions *Block*). Même taille de pédale et de fenêtre que **Small Tone** / **Holyverb**.
+(versions *Block*), plus un bouton **SYNC** au tempo du DAW. Version 1.1.0. Même taille de pédale et de fenêtre que **Small Tone** / **Holyverb**.
 
 ## Compiler avec GitHub
 1. Mets **tous les fichiers à la racine du dépôt** (avec le dossier `.github/workflows`).
@@ -22,22 +22,23 @@ effet de R28, niveaux, bypass, stabilité de 44,1 à 192 kHz). S'il échoue, le 
 |---|---|
 | **SPEED** | vitesse du LFO, ≈ 0,10 Hz → 4,4 Hz (Script) / 5,2 Hz (Block), potard 470k log comme l'original (midi ≈ 0,9 Hz). Tirer haut/bas ou gauche/droite, molette, **Maj** = réglage fin, double-clic = midi |
 | Cartouche **PHASE** | clic = bascule **SCRIPT '74** (sans R28, doux) / **BLOCK** (R28, plus de médiums, le M101 actuel) |
+| Bouton **SYNC** (en bas à droite du SPEED) | chaque clic : OFF → **1/4** → **1/8** → **1/2** → OFF. En SYNC, le balayage suit le tempo du DAW (calé sur la grille pendant la lecture), l'anneau clignote une fois par division et le SPEED est inactif |
 | Footswitch | effet / bypass (true bypass) — l'anneau du footswitch et les graduations orange s'allument |
-| Ligne d'état (sous « PHASE ») | preset, vitesse en Hz, version, ou BYPASS |
+| Ligne d'état (sous « PHASE ») | n'apparaît que pendant un réglage, reste 1,5 s puis s'efface (sauf pendant un MIDI Learn) |
 
 Les graduations orange « respirent » avec le LFO (plus lumineuses quand le balayage est en haut) — désactivable.
 
 ## Presets
 Menu des presets de la fenêtre du DAW (programmes VST3) : Classic Block, Script '74, Eruption, Brown Sound,
-Slow Jet, Funk Rhythm, Fast Warble, Rotary Fast, Bass Swirl. Clic droit → 9 presets utilisateur
+Slow Jet, Funk Rhythm, Fast Warble, Rotary Fast, Bass Swirl, Tempo 1/4, Tempo 1/8 Funk, Tempo 1/2 Swell. Clic droit → 9 presets utilisateur
 communs à toutes les instances (`%APPDATA%\Studio Wiga\Phase 90\user_presets.xml`).
 
 ## Clic droit (n'importe où)
 - **Voicing** : Script '74 / Block '77.
 - **Window size** : défaut (493 px de haut = taille minimale, comme Small Tone / Holyverb), 60 %, 75 %, 100 % — ou tirer le coin.
-- **Options** : SPEED synchronisé au tempo du DAW (4 mesures → 1/16), stéréo élargie (LFO du canal droit
+- **Options** : Tempo sync (Off / 1/4 / 1/8 / 1/2, comme le bouton SYNC), stéréo élargie (LFO du canal droit
   en opposition ; l'original est mono), graduations qui pulsent avec le LFO.
-- **MIDI** : canal, *Learn* — par défaut Footswitch = CC 80, Speed = CC 81, Script/Block = CC 82 ;
+- **MIDI** : canal, *Learn* — par défaut Footswitch = CC 80, Speed = CC 81, Script/Block = CC 82, bouton SYNC = CC 83 (chaque appui = état suivant) ;
   pédale à verrouillage ou momentanée ; Program Change n = preset n+1.
 
 ## Fonctionnement (résumé)

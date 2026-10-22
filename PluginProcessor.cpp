@@ -8,15 +8,18 @@ const std::vector<FactoryPreset>& Phase90Processor::factoryPresets()
 {
     // vitesse du LFO en Hz (convertie en position du potard SPEED) / BLOCK (R28) ou SCRIPT
     static const std::vector<FactoryPreset> p {
-        { "Classic Block",    0.92, true  },   // potard à midi, le Phase 90 actuel (M101)
-        { "Script '74",       0.70, false },   // le son doux et rond des premiers modèles
-        { "Eruption",         0.28, false },   // balayage lent sur un son saturé
-        { "Brown Sound",      0.40, true  },   // rythmique crunch, R28 pour le mordant
-        { "Slow Jet",         0.12, true  },   // effet "avion" très lent
-        { "Funk Rhythm",      2.20, true  },   // rythmique funk en clean
-        { "Fast Warble",      4.40, false },   // vitesse maxi Script
-        { "Rotary Fast",      5.10, true  },   // vitesse maxi Block, façon haut-parleur tournant
-        { "Bass Swirl",       0.50, false },   // pour la basse (Script = moins de creux)
+        { "Classic Block",    0.92, true,  0 },   // potard à midi, le Phase 90 actuel (M101)
+        { "Script '74",       0.70, false, 0 },   // le son doux et rond des premiers modèles
+        { "Eruption",         0.28, false, 0 },   // balayage lent sur un son saturé
+        { "Brown Sound",      0.40, true,  0 },   // rythmique crunch, R28 pour le mordant
+        { "Slow Jet",         0.12, true,  0 },   // effet "avion" très lent
+        { "Funk Rhythm",      2.20, true,  0 },   // rythmique funk en clean
+        { "Fast Warble",      4.40, false, 0 },   // vitesse maxi Script
+        { "Rotary Fast",      5.10, true,  0 },   // vitesse maxi Block, façon haut-parleur tournant
+        { "Bass Swirl",       0.50, false, 0 },   // pour la basse (Script = moins de creux)
+        { "Tempo 1/4",        0.92, true,  1 },   // un balayage par temps, calé sur le DAW
+        { "Tempo 1/8 Funk",   2.20, true,  2 },   // deux balayages par temps
+        { "Tempo 1/2 Swell",  0.40, false, 3 },   // un balayage tous les 2 temps
     };
     return p;
 }
@@ -34,7 +37,8 @@ AudioProcessorValueTreeState::ParameterLayout Phase90Processor::createLayout()
     p.push_back (std::make_unique<AudioParameterBool> (ParameterID { "block", 1 }, "Voicing (Script / Block)", true,
         AudioParameterBoolAttributes().withStringFromValueFunction ([] (bool v, int) { return v ? String ("BLOCK") : String ("SCRIPT"); })));
     p.push_back (std::make_unique<AudioParameterBool> (ParameterID { "on", 1 }, "Footswitch (On)", true));
-    p.push_back (std::make_unique<AudioParameterBool> (ParameterID { "sync", 1 }, "Speed tempo sync", false));
+    p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { "syncdiv", 1 }, "Tempo sync (SYNC button)",
+                                                          StringArray { "Off", "1/4", "1/8", "1/2" }, 0));
     p.push_back (std::make_unique<AudioParameterBool> (ParameterID { "stereo", 1 }, "Stereo spread", false));
     p.push_back (std::make_unique<AudioParameterBool> (ParameterID { "ticklfo", 1 }, "Speed ring follows LFO", true));
     p.push_back (std::make_unique<AudioParameterInt>  (ParameterID { "midichan", 1 }, "MIDI channel (0 = omni)", 0, 16, 0));
@@ -68,15 +72,18 @@ void Phase90Processor::prepareToPlay (double sampleRate, int samplesPerBlock)
 //==============================================================================
 String Phase90Processor::syncDivisionName (int i)
 {
-    static const char* n[] = { "4 BARS", "2 BARS", "1 BAR", "1/2", "1/4.", "1/4", "1/4T", "1/8", "1/16" };
-    return n[jlimit (0, numSyncDivisions - 1, i)];
+    static const char* n[] = { "OFF", "1/4", "1/8", "1/2" };
+    return n[jlimit (0, numSyncStates - 1, i)];
 }
 double Phase90Processor::syncDivisionBeats (int i)
 {
-    static const double b[] = { 16.0, 8.0, 4.0, 2.0, 1.5, 1.0, 2.0 / 3.0, 0.5, 0.25 };
-    return b[jlimit (0, numSyncDivisions - 1, i)];
+    static const double b[] = { 0.0, 1.0, 0.5, 2.0 };       // durée d'un cycle, en temps (noires)
+    return b[jlimit (0, numSyncStates - 1, i)];
 }
-int Phase90Processor::syncDivisionIndex (float r) { return jlimit (0, numSyncDivisions - 1, roundToInt (r * (numSyncDivisions - 1))); }
+void Phase90Processor::cycleSync()
+{
+    setParam ("syncdiv", (float) ((syncState() + 1) % numSyncStates));
+}
 
 //==============================================================================
 void Phase90Processor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& midi)
@@ -100,7 +107,7 @@ void Phase90Processor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& mid
             const int lt = learnTarget.load();
             if (lt >= 0)
             {
-                (lt == 0 ? ccFoot : lt == 1 ? ccSpeed : ccVoice).store (cc);
+                (lt == 0 ? ccFoot : lt == 1 ? ccSpeed : lt == 2 ? ccVoice : ccSync).store (cc);
                 lastLearned.store (lt); learnTarget.store (-1); triggerUi = true;
                 continue;
             }
@@ -113,6 +120,12 @@ void Phase90Processor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& mid
             }
             if (cc == ccSpeed.load()) { pendingSpeed.store (v / 127.0f); triggerUi = true; }
             if (cc == ccVoice.load()) { pendingVoice.store (v >= 64 ? 1 : 0); triggerUi = true; }
+            if (cc == ccSync.load())                             // chaque appui = état suivant (comme un clic)
+            {
+                const bool high = v >= 64;
+                if (high && ! syncCcWasHigh) { pendingSyncStep.fetch_add (1); triggerUi = true; }
+                syncCcWasHigh = high;
+            }
         }
         else if (msg.isProgramChange())
         {
@@ -122,11 +135,16 @@ void Phase90Processor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& mid
     midi.clear();
     if (triggerUi) triggerAsyncUpdate();
 
-    // ---- tempo
+    // ---- tempo et position du DAW
     double bpm = hostBpm.load();
+    double ppq = -1.0;
     if (auto* ph = getPlayHead())
         if (auto pos = ph->getPosition())
+        {
             if (auto b = pos->getBpm()) bpm = *b;
+            if (pos->getIsPlaying())
+                if (auto q = pos->getPpqPosition()) ppq = *q;
+        }
     hostBpm.store (bpm);
 
     phase90::Engine::Settings st;
@@ -134,14 +152,19 @@ void Phase90Processor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& mid
     st.block = isBlock();
     st.on = isOn();
     st.stereoSpread = apvts.getRawParameterValue ("stereo")->load() > 0.5f;
-    if (apvts.getRawParameterValue ("sync")->load() > 0.5f)
-        st.syncHz = jlimit (0.02, 20.0, bpm / 60.0 / syncDivisionBeats (syncDivisionIndex ((float) st.speed)));
+    if (const int sd = syncState(); sd > 0)
+    {
+        const double beats = syncDivisionBeats (sd);
+        st.syncHz = jlimit (0.02, 20.0, bpm / 60.0 / beats);
+        if (ppq >= 0.0) st.syncPhase = ppq / beats;          // lecture en cours : balayage calé sur la grille
+    }
 
     float* io[2] { buffer.getWritePointer (0), buffer.getWritePointer (jmin (1, outCh - 1)) };
     engine.process (io, jmin (2, outCh), n, st);
 
     lfoVisual.store ((float) engine.lfoNormalised());
     sweepVisual.store ((float) engine.sweepHz());
+    lfoPhaseVisual.store ((float) engine.lfoPhase());
 }
 
 //==============================================================================
@@ -161,6 +184,8 @@ void Phase90Processor::handleAsyncUpdate()
     if (r >= 0.0f) { setParam ("speed", r); presetName = {}; }
     const int d = pendingVoice.exchange (-1);
     if (d >= 0) { setParam ("block", (float) d); presetName = {}; }
+    const int ss = pendingSyncStep.exchange (0);
+    for (int i = 0; i < ss; ++i) cycleSync();
     const int fs = pendingFootSet.exchange (-1);
     if (fs >= 0) setParam ("on", (float) fs);
     const int ft = pendingFootToggle.exchange (0);
@@ -183,13 +208,14 @@ void Phase90Processor::setCurrentProgram (int i)
     if (! isPositiveAndBelow (i, (int) factoryPresets().size())) return;
     currentProgram = i;
     const auto& p = factoryPresets()[(size_t) i];
-    applyPreset ((float) phase90::Engine::posForHz (p.hz, p.block), p.block, p.name);
+    applyPreset ((float) phase90::Engine::posForHz (p.hz, p.block), p.block, p.sync, p.name);
 }
 
-void Phase90Processor::applyPreset (float speed, bool block, const String& name)
+void Phase90Processor::applyPreset (float speed, bool block, int sync, const String& name)
 {
     setParam ("speed", speed);
     setParam ("block", block ? 1.0f : 0.0f);
+    setParam ("syncdiv", (float) jlimit (0, numSyncStates - 1, sync));
     setParam ("on", 1.0f);
     presetName = name;
 }
@@ -224,7 +250,7 @@ bool Phase90Processor::loadUserPreset (int slot)
         if (e->getIntAttribute ("slot") == slot)
         {
             applyPreset ((float) e->getDoubleAttribute ("speed", 0.5), e->getBoolAttribute ("block", true),
-                         e->getStringAttribute ("name", "User " + String (slot)));
+                         e->getIntAttribute ("sync", 0), e->getStringAttribute ("name", "User " + String (slot)));
             return true;
         }
     return false;
@@ -240,6 +266,7 @@ void Phase90Processor::saveUserPreset (int slot, const String& name)
     e->setAttribute ("name", name);
     e->setAttribute ("speed", (double) getSpeed());
     e->setAttribute ("block", isBlock());
+    e->setAttribute ("sync", syncState());
     auto f = userPresetFile();
     f.getParentDirectory().createDirectory();
     x->writeTo (f);
@@ -254,6 +281,7 @@ void Phase90Processor::getStateInformation (MemoryBlock& dest)
     xml->setAttribute ("ccFoot", ccFoot.load());
     xml->setAttribute ("ccSpeed", ccSpeed.load());
     xml->setAttribute ("ccVoice", ccVoice.load());
+    xml->setAttribute ("ccSync", ccSync.load());
     xml->setAttribute ("uiHeight", uiHeight.load());
     xml->setAttribute ("presetName", presetName);
     xml->setAttribute ("program", currentProgram);
@@ -269,6 +297,7 @@ void Phase90Processor::setStateInformation (const void* data, int size)
             ccFoot = xml->getIntAttribute ("ccFoot", 80);
             ccSpeed = xml->getIntAttribute ("ccSpeed", 81);
             ccVoice = xml->getIntAttribute ("ccVoice", 82);
+            ccSync = xml->getIntAttribute ("ccSync", 83);
             uiHeight = jlimit (p9ui::heightDefault, p9ui::heightMax, xml->getIntAttribute ("uiHeight", p9ui::heightDefault));
             presetName = xml->getStringAttribute ("presetName");
             currentProgram = xml->getIntAttribute ("program", 0);

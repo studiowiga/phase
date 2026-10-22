@@ -9,7 +9,7 @@ namespace p9ui
 constexpr int heightDefault = 493, height60 = 592, height75 = 740, height100 = 986, heightMax = 1479;
 }
 
-struct FactoryPreset { const char* name; double hz; bool block; };
+struct FactoryPreset { const char* name; double hz; bool block; int sync; };
 
 class Phase90Processor : public juce::AudioProcessor,
                          private juce::AsyncUpdater
@@ -49,7 +49,7 @@ public:
     // ----- presets
     static const std::vector<FactoryPreset>& factoryPresets();
     juce::String presetName;                 // nom affiché sur la ligne d'état (vide = réglage libre)
-    void applyPreset (float speed, bool block, const juce::String& name);
+    void applyPreset (float speed, bool block, int sync, const juce::String& name);
     // presets utilisateur 1 … 9 (communs à toutes les instances)
     static juce::File userPresetFile();
     juce::String userPresetName (int slot) const;          // "" si vide
@@ -57,18 +57,21 @@ public:
     void saveUserPreset (int slot, const juce::String& name);
 
     // ----- MIDI
-    std::atomic<int> ccFoot { 80 }, ccSpeed { 81 }, ccVoice { 82 };
-    std::atomic<int> learnTarget { -1 };      // 0 foot, 1 speed, 2 script/block
+    std::atomic<int> ccFoot { 80 }, ccSpeed { 81 }, ccVoice { 82 }, ccSync { 83 };
+    std::atomic<int> learnTarget { -1 };      // 0 foot, 1 speed, 2 script/block, 3 sync
     std::atomic<int> lastLearned { -1 };      // pour l'affichage
     std::atomic<int> uiHeight { p9ui::heightDefault };
 
     // ----- infos pour l'interface
     std::atomic<float> lfoVisual { 0.5f }, sweepVisual { 1000.0f };
     std::atomic<double> hostBpm { 120.0 };
+    std::atomic<float> lfoPhaseVisual { 0.0f };
+    // bouton SYNC : 0 = OFF (SPEED en Hz), 1 = 1/4, 2 = 1/8, 3 = 1/2 (un cycle complet du balayage par division)
     static juce::String syncDivisionName (int i);
     static double syncDivisionBeats (int i);
-    static int syncDivisionIndex (float speed01);
-    static constexpr int numSyncDivisions = 9;
+    static constexpr int numSyncStates = 4;
+    int syncState() const { return juce::jlimit (0, numSyncStates - 1, (int) apvts.getRawParameterValue ("syncdiv")->load()); }
+    void cycleSync();                         // OFF -> 1/4 -> 1/8 -> 1/2 -> OFF (thread de l'interface)
 
     bool isOn() const      { return apvts.getRawParameterValue ("on")->load() > 0.5f; }
     bool isBlock() const   { return apvts.getRawParameterValue ("block")->load() > 0.5f; }
@@ -84,8 +87,8 @@ private:
 
     // changements venant du MIDI (thread audio) appliqués sur le thread de l'interface
     std::atomic<float> pendingSpeed { -1.0f };
-    std::atomic<int> pendingVoice { -1 }, pendingFootToggle { 0 }, pendingFootSet { -1 }, pendingProgram { -1 };
-    bool footCcWasHigh = false;
+    std::atomic<int> pendingVoice { -1 }, pendingSyncStep { 0 }, pendingFootToggle { 0 }, pendingFootSet { -1 }, pendingProgram { -1 };
+    bool footCcWasHigh = false, syncCcWasHigh = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Phase90Processor)
 };

@@ -69,6 +69,19 @@ int main()
     const double fSync = measureLfoHz (0.5, false, 48000, 2.0);
     CHECK (std::abs (fSync - 2.0) < 0.04, "synchro tempo : 2.000 Hz demandé, %.3f Hz mesuré", fSync);
     CHECK (std::abs (Engine::speedHz (Engine::posForHz (1.0, true), true) - 1.0) < 1e-6, "conversion Hz -> position du potard");
+    {   // bouton SYNC, lecture en cours : la phase du LFO suit la position du DAW (1/4 à 120 BPM = 2 Hz)
+        Engine e; e.prepare (48000, 480); Engine::Settings st; st.syncHz = 2.0;
+        std::vector<float> l (480), r (480); double worst = 0;
+        for (int b = 0; b < 200; ++b)
+        {
+            const double ppq = b * 480 / 48000.0 * 2.0;            // noires écoulées
+            st.syncPhase = ppq / 1.0;
+            float* io[2] { l.data(), r.data() }; e.process (io, 2, 480, st);
+            const double expect = std::fmod ((b + 1) * 480 / 48000.0 * 2.0, 1.0);
+            double d = std::abs (e.lfoPhase() - expect); d = std::min (d, 1.0 - d); worst = std::max (worst, d);
+        }
+        CHECK (worst < 0.01, "SYNC : balayage calé sur la grille du DAW (écart max %.4f cycle)", worst);
+    }
 
     std::printf ("\n[Encoches (SCRIPT, LFO figé)]\n");
     {

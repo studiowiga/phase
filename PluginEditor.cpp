@@ -71,19 +71,37 @@ void Phase90Editor::rebuildScaledImages()
 //==============================================================================
 String Phase90Editor::speedText() const
 {
-    if (proc.apvts.getRawParameterValue ("sync")->load() > 0.5f)
-        return "SYNC " + Phase90Processor::syncDivisionName (Phase90Processor::syncDivisionIndex (proc.getSpeed()));
+    if (proc.syncState() > 0) return "SYNC " + Phase90Processor::syncDivisionName (proc.syncState());
     const double hz = proc.speedHz();
     return String (hz, hz < 1.0 ? 2 : 1) + " HZ";
 }
 
+String Phase90Editor::speedStatus() const
+{
+    if (proc.syncState() > 0) return speedText() + "  -  SPEED INACTIVE";
+    return "SPEED " + speedText() + "  -  " + (proc.isBlock() ? "BLOCK" : "SCRIPT");
+}
+
+String Phase90Editor::syncStatus() const
+{
+    const int sd = proc.syncState();
+    if (sd == 0) { const double hz = proc.speedHz(); return "SYNC OFF  -  SPEED " + String (hz, hz < 1.0 ? 2 : 1) + " HZ"; }
+    return "SYNC " + Phase90Processor::syncDivisionName (sd) + "  -  " + String (roundToInt (proc.hostBpm.load())) + " BPM";
+}
+
+// la ligne d'état n'apparaît que pendant un réglage (puis 1,5 s) et pendant un MIDI Learn
 String Phase90Editor::statusText() const
 {
-    if (Time::getMillisecondCounterHiRes() * 0.001 < flashUntil) return flashText;
     if (proc.learnTarget.load() >= 0) return "MIDI LEARN...";
-    if (! proc.isOn()) return "BYPASS";
-    if (proc.presetName.isNotEmpty()) return proc.presetName.toUpperCase();
-    return "SPEED " + speedText() + "  -  " + (proc.isBlock() ? "BLOCK" : "SCRIPT");
+    if (Time::getMillisecondCounterHiRes() * 0.001 < flashUntil + art::statusFade) return flashText;
+    return {};
+}
+
+float Phase90Editor::statusAlpha() const
+{
+    if (proc.learnTarget.load() >= 0) return 1.0f;
+    const double t = Time::getMillisecondCounterHiRes() * 0.001;
+    return (float) jlimit (0.0, 1.0, (flashUntil + art::statusFade - t) / art::statusFade);
 }
 
 void Phase90Editor::flash (const String& t, double seconds)
@@ -108,7 +126,6 @@ void Phase90Editor::setSpeed (float v)
     if (auto* p = proc.apvts.getParameter ("speed"))
         p->setValueNotifyingHost (jlimit (0.0f, 1.0f, v));
     proc.presetName = {};
-    flash ("SPEED " + speedText());
 }
 
 //==============================================================================
@@ -122,11 +139,31 @@ void Phase90Editor::timerCallback()
     tickLevel += (tickTarget - tickLevel) * k;
     footLevel += ((on ? 1.0f : 0.0f) - footLevel) * k;
 
+    // bouton SYNC : l'anneau s'allume et clignote une fois par division (plein sur le temps, atténué entre deux)
+    const int sd = proc.syncState();
+    const float ph = proc.lfoPhaseVisual.load();
+    const float syncTarget = sd > 0 ? 0.30f + 0.70f * std::pow (1.0f - ph, 2.2f) : 0.0f;
+    syncLevel += (syncTarget - syncLevel) * 0.5f;
+
+    // un réglage a changé (souris, MIDI, automation du DAW, preset) -> la ligne d'état apparaît
+    const float sp = proc.getSpeed();
+    const int bl = proc.isBlock() ? 1 : 0, onI = on ? 1 : 0;
+    if (lastOn >= 0)
+    {
+        if (std::abs (sp - lastSpeed) > 1.0e-5f) flash (speedStatus());
+        if (bl != lastBlock)  flash (bl ? "BLOCK (R28 ON)" : "SCRIPT '74 (R28 OFF)");
+        if (onI != lastOn)    flash (onI ? "ON" : "BYPASS", 1.0);
+        if (sd != lastSync)   flash (syncStatus());
+        if (proc.presetName != lastPreset && proc.presetName.isNotEmpty() && ! flashText.contains (proc.presetName.toUpperCase()))
+            flash (proc.presetName.toUpperCase(), 2.0);
+    }
+    lastSpeed = sp; lastBlock = bl; lastOn = onI; lastSync = sd; lastPreset = proc.presetName;
+
     const int learned = proc.lastLearned.exchange (-1);
     if (learned >= 0)
     {
-        const int cc = learned == 0 ? proc.ccFoot.load() : learned == 1 ? proc.ccSpeed.load() : proc.ccVoice.load();
-        flash (String (learned == 0 ? "FOOTSWITCH" : learned == 1 ? "SPEED" : "SCRIPT/BLOCK") + " = CC " + String (cc), 2.0);
+        const int cc = learned == 0 ? proc.ccFoot.load() : learned == 1 ? proc.ccSpeed.load() : learned == 2 ? proc.ccVoice.load() : proc.ccSync.load();
+        flash (String (learned == 0 ? "FOOTSWITCH" : learned == 1 ? "SPEED" : learned == 2 ? "SCRIPT/BLOCK" : "SYNC") + " = CC " + String (cc), 2.0);
     }
 
     // on ne redessine que ce qui bouge (graduations + potard, footswitch, ligne d'état)
@@ -134,6 +171,7 @@ void Phase90Editor::timerCallback()
     repaint (Rectangle<float> (art::ticksX * s, art::ticksY * s, 580.0f * s, 580.0f * s).toNearestInt().expanded (2));
     repaint (Rectangle<float> (art::footX * s, art::footY * s, 400.0f * s, 400.0f * s).toNearestInt().expanded (2));
     repaint (toWin ({ art::statusX - 360.0f, art::statusY - 40.0f, 720.0f, 80.0f }).toNearestInt());
+    repaint (toWin ({ art::sync.x - 110.0f, art::sync.y - 90.0f, 220.0f, 200.0f }).toNearestInt());
 }
 
 //==============================================================================
@@ -166,7 +204,52 @@ void Phase90Editor::paint (Graphics& g)
     }
 
     paintKnobPointer (g);
+    paintSyncButton (g);
     paintStatusLine (g);
+}
+
+void Phase90Editor::paintSyncButton (Graphics& g) const
+{
+    // petit bouton-poussoir dessiné en code (net à toutes les tailles) : même lumière venant du haut que le visuel
+    const float s = scale();
+    const Point<float> c (art::sync.x * s, art::sync.y * s);
+    const float R = art::sync.r * s, ringR = R * 1.16f, r2 = R * 0.80f;
+    auto circle = [] (Point<float> cc, float r) { Path p; p.addEllipse (cc.x - r, cc.y - r, 2 * r, 2 * r); return p; };
+
+    // ombre portée
+    DropShadow (Colours::black.withAlpha (0.70f), jmax (1, roundToInt (9.0f * s)), { 0, jmax (1, roundToInt (5.0f * s)) })
+        .drawForPath (g, circle (c, R * 1.06f));
+
+    // anneau LED (diffuseur) : gris éteint, orange + halo quand SYNC est actif
+    const float lv = jlimit (0.0f, 1.0f, syncLevel);
+    if (lv > 0.003f)
+        for (int i = 6; i >= 1; --i)
+        {
+            g.setColour (Colour (255, 110, 20).withAlpha (0.30f * lv * (1.0f - (float) i / 7.0f)));
+            g.strokePath (circle (c, ringR), PathStrokeType ((3.2f + 3.6f * (float) i) * s));
+        }
+    g.setColour (Colour (70, 62, 58).interpolatedWith (Colour (255, 196, 116), lv));
+    g.strokePath (circle (c, ringR), PathStrokeType (3.2f * s));
+
+    // jupe chromée
+    g.setGradientFill (ColourGradient (Colour (226, 226, 230), c.x, c.y - R, Colour (78, 78, 82), c.x, c.y + R, false));
+    g.fillPath (circle (c, R));
+    // chapeau noir + reflet en haut
+    g.setGradientFill (ColourGradient (Colour (64, 64, 66), c.x, c.y - r2, Colour (10, 10, 11), c.x, c.y + r2, false));
+    g.fillPath (circle (c, r2));
+    {
+        ColourGradient hl (Colours::white.withAlpha (0.30f), c.x, c.y - r2 * 0.55f, Colours::white.withAlpha (0.0f), c.x + r2 * 0.75f, c.y - r2 * 0.55f, true);
+        g.setGradientFill (hl);
+        g.fillEllipse (c.x - r2 * 0.75f, c.y - r2 * 0.85f, r2 * 1.5f, r2 * 0.62f);
+    }
+    g.setColour (Colour (15, 15, 16));
+    g.strokePath (circle (c, r2), PathStrokeType (1.2f * s));
+
+    // inscription : "SYNC" (gris) ou "SYNC 1/4" (orange)
+    const int sd = proc.syncState();
+    paintText (g, sd > 0 ? "SYNC " + Phase90Processor::syncDivisionName (sd) : String ("SYNC"),
+               art::sync.x, art::syncLabelY, art::syncLabelCapH, 210.0f,
+               sd > 0 ? Colour (255, 150, 60) : Colour (214, 214, 218).withAlpha (0.92f));
 }
 
 void Phase90Editor::paintKnobPointer (Graphics& g) const
@@ -199,17 +282,24 @@ void Phase90Editor::paintKnobPointer (Graphics& g) const
 
 void Phase90Editor::paintStatusLine (Graphics& g) const
 {
-    // même police que "SPEED", dans la zone noire sous le cartouche "PHASE"
-    const float s = scale();
     const String t = statusText();
-    float fontH = art::statusCapH / capRatio * s;
+    const float a = statusAlpha();
+    if (t.isEmpty() || a <= 0.003f) return;
+    paintText (g, t, art::statusX, art::statusY, art::statusCapH, art::statusMaxW, Colour (214, 214, 218).withAlpha (0.92f * a));
+}
+
+void Phase90Editor::paintText (Graphics& g, const String& t, float cx, float cy, float capHArt, float maxWArt, Colour col) const
+{
+    // même police que "SPEED" ; texte centré sur (cx, cy) = centre des capitales
+    const float s = scale();
+    float fontH = capHArt / capRatio * s;
     Font f (FontOptions (labelFace).withHeight (fontH));
     f.setExtraKerningFactor (0.03f);
     GlyphArrangement ga;
     ga.addLineOfText (f, t, 0, 0);
     Path p; ga.createPath (p);
     auto bb = p.getBounds();
-    const float maxW = art::statusMaxW * s;
+    const float maxW = maxWArt * s;
     if (bb.getWidth() > maxW)
     {
         fontH *= maxW / bb.getWidth();
@@ -218,13 +308,12 @@ void Phase90Editor::paintStatusLine (Graphics& g) const
         p.clear(); ga.createPath (p);
         bb = p.getBounds();
     }
-    const float capH = art::statusCapH * s * jmin (1.0f, fontH / (art::statusCapH / capRatio * s));
-    const float capTop = art::statusY * s - capH * 0.5f;
-    const float dx = art::statusX * s - bb.getCentreX();
-    const float dy = capTop - capTopRatio * fontH;
-    g.setColour (Colours::black.withAlpha (0.6f));
+    const float capH = fontH * capRatio;
+    const float dx = cx * s - bb.getCentreX();
+    const float dy = cy * s - capH * 0.5f - capTopRatio * fontH;
+    g.setColour (Colours::black.withAlpha (0.6f * col.getFloatAlpha()));
     g.fillPath (p, AffineTransform::translation (dx, dy + 1.2f * s));
-    g.setColour (Colour (214, 214, 218).withAlpha (0.92f));
+    g.setColour (col);
     g.fillPath (p, AffineTransform::translation (dx, dy));
 }
 
@@ -233,6 +322,8 @@ Phase90Editor::Hit Phase90Editor::hitAt (Point<float> a) const
 {
     if (a.getDistanceFrom ({ art::knob.x, art::knob.y }) <= art::knob.r) return Hit::knob;
     if (art::phaseBox.contains (a)) return Hit::phase;
+    if (a.getDistanceFrom ({ art::sync.x, art::sync.y }) <= art::sync.r * 1.5f
+        || Rectangle<float> (art::sync.x - 90.0f, art::syncLabelY - 22.0f, 180.0f, 44.0f).contains (a)) return Hit::sync;
     if (a.getDistanceFrom ({ art::foot.x, art::foot.y }) <= art::foot.r) return Hit::foot;
     return Hit::none;
 }
@@ -254,20 +345,22 @@ void Phase90Editor::mouseDown (const MouseEvent& e)
         case Hit::knob:
             dragging = Hit::knob; dragStart = e.position; dragStartSpeed = proc.getSpeed();
             if (auto* p = proc.apvts.getParameter ("speed")) p->beginChangeGesture();
-            flash ("SPEED " + speedText());
+            flash (speedStatus());
+            break;
+        case Hit::sync:
+            proc.cycleSync();                     // OFF -> 1/4 -> 1/8 -> 1/2 -> OFF
+            proc.presetName = {};
             break;
         case Hit::phase:
         {
             const bool block = ! proc.isBlock();
             setParam ("block", block ? 1.0f : 0.0f);
             proc.presetName = {};
-            flash (block ? "BLOCK (R28 ON)" : "SCRIPT '74 (R28 OFF)");
             break;
         }
         case Hit::foot:
             footDown = true;
             setParam ("on", proc.isOn() ? 0.0f : 1.0f);
-            flash (proc.isOn() ? "ON" : "BYPASS", 1.0);
             break;
         case Hit::none: break;
     }
@@ -350,7 +443,10 @@ void Phase90Editor::showContextMenu()
     voice.addItem (521, "Block '77 (R28 feedback - more mids, M101)", true, proc.isBlock());
 
     PopupMenu opt;
-    opt.addItem (501, "Speed synced to host tempo (" + String (proc.hostBpm.load(), 1) + " BPM)", true, flag ("sync"));
+    PopupMenu syncM;
+    for (int i = 0; i < Phase90Processor::numSyncStates; ++i)
+        syncM.addItem (530 + i, i == 0 ? String ("Off (SPEED in Hz)") : "Sync " + Phase90Processor::syncDivisionName (i), true, proc.syncState() == i);
+    opt.addSubMenu ("Tempo sync - " + String (proc.hostBpm.load(), 1) + " BPM (SYNC button)", syncM);
     opt.addItem (502, "Stereo spread (right channel LFO inverted)", true, flag ("stereo"));
     opt.addItem (504, "Speed ring pulses with the LFO", true, flag ("ticklfo"));
 
@@ -363,7 +459,8 @@ void Phase90Editor::showContextMenu()
     midi.addItem (701, "Learn: Footswitch (CC " + String (proc.ccFoot.load()) + ")");
     midi.addItem (702, "Learn: Speed (CC " + String (proc.ccSpeed.load()) + ")");
     midi.addItem (703, "Learn: Script / Block (CC " + String (proc.ccVoice.load()) + ")");
-    midi.addItem (704, "Reset MIDI assignments (CC 80-82)");
+    midi.addItem (705, "Learn: Sync button (CC " + String (proc.ccSync.load()) + ")");
+    midi.addItem (704, "Reset MIDI assignments (CC 80-83)");
     midi.addSeparator();
     const bool mom = flag ("ccmomentary");
     midi.addItem (710, "Footswitch: latching pedal (127 = on, 0 = bypass)", true, ! mom);
@@ -399,14 +496,14 @@ void Phase90Editor::showContextMenu()
         {
             setParam ("block", r == 521 ? 1.0f : 0.0f);
             proc.presetName = {};
-            flash (r == 521 ? "BLOCK (R28 ON)" : "SCRIPT '74 (R28 OFF)");
         }
-        else if (r == 501) { toggleFlag ("sync"); flash (flag ("sync") ? "TEMPO SYNC ON" : "TEMPO SYNC OFF"); }
+        else if (r >= 530 && r < 530 + Phase90Processor::numSyncStates) { setParam ("syncdiv", (float) (r - 530)); proc.presetName = {}; }
         else if (r == 502) { toggleFlag ("stereo"); flash (flag ("stereo") ? "STEREO SPREAD" : "MONO (ORIGINAL)"); }
         else if (r == 504) toggleFlag ("ticklfo");
         else if (r >= 600 && r <= 616) setParam ("midichan", (float) (r - 600));
         else if (r >= 701 && r <= 703) proc.learnTarget.store (r - 701);
-        else if (r == 704) { proc.ccFoot = 80; proc.ccSpeed = 81; proc.ccVoice = 82; flash ("CC 80 / 81 / 82"); }
+        else if (r == 705) proc.learnTarget.store (3);
+        else if (r == 704) { proc.ccFoot = 80; proc.ccSpeed = 81; proc.ccVoice = 82; proc.ccSync = 83; flash ("CC 80 / 81 / 82 / 83"); }
         else if (r == 710 || r == 711) setParam ("ccmomentary", r == 711 ? 1.0f : 0.0f);
         repaint();
     });

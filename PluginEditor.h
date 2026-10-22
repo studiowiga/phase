@@ -21,6 +21,9 @@ const juce::Rectangle<float> phaseBox { 488.0f, 818.0f, 546.0f, 194.0f };   // c
 constexpr float statusX = 760.0f, statusY = 1110.0f;      // ligne d'état (zone noire sous "PHASE")
 constexpr float statusCapH = 33.0f;                       // hauteur des capitales (style "SPEED")
 constexpr float statusMaxW = 660.0f;
+constexpr Circle sync   { 1036.0f, 606.0f, 30.0f };       // bouton SYNC (en bas à droite du potard SPEED)
+constexpr float syncLabelY = 673.0f, syncLabelCapH = 19.5f;   // inscription "SYNC" / "SYNC 1/4" (centre des capitales)
+constexpr float statusHold = 1.5f, statusFade = 0.4f;    // ligne d'état : visible 1,5 s après le dernier réglage puis fondu
 }
 
 //==============================================================================
@@ -46,12 +49,17 @@ private:
     float scale() const { return (float) getWidth() / art::W; }
     juce::Point<float> toArt (juce::Point<float> p) const { return p / scale(); }
     juce::Rectangle<float> toWin (juce::Rectangle<float> r) const { const float s = scale(); return { r.getX() * s, r.getY() * s, r.getWidth() * s, r.getHeight() * s }; }
-    enum class Hit { none, knob, phase, foot };
+    enum class Hit { none, knob, phase, foot, sync };
     Hit hitAt (juce::Point<float> artPos) const;
 
     void setParam (const juce::String& id, float plain);
     void setSpeed (float v01);
-    void flash (const juce::String& text, double seconds = 1.6);
+    void flash (const juce::String& text, double seconds = art::statusHold);
+    float statusAlpha() const;
+    juce::String speedStatus() const;
+    juce::String syncStatus() const;
+    void paintSyncButton (juce::Graphics&) const;
+    void paintText (juce::Graphics&, const juce::String&, float centreX, float capCentreY, float capH, float maxW, juce::Colour) const;
     juce::String statusText() const;
     juce::String speedText() const;
     void showContextMenu();
@@ -67,7 +75,9 @@ private:
     juce::Typeface::Ptr labelFace;
     float capRatio = 0.72f, capTopRatio = -0.72f;    // capitales : hauteur et haut (y) / hauteur de police
 
-    float tickLevel = 1.0f, footLevel = 1.0f;
+    float tickLevel = 1.0f, footLevel = 1.0f, syncLevel = 0.0f;
+    // dernières valeurs vues : un changement (souris, MIDI, automation, preset) fait apparaître la ligne d'état
+    float lastSpeed = -1.0f; int lastBlock = -1, lastOn = -1, lastSync = -1; juce::String lastPreset;
     bool footDown = false;
     Hit dragging = Hit::none;
     float dragStartSpeed = 0.0f;

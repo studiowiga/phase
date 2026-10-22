@@ -94,6 +94,7 @@ public:
         bool on = true;             // footswitch
         bool stereoSpread = false;  // LFO du canal droit en opposition (option, l'original est mono)
         double syncHz = 0.0;        // > 0 : fréquence du LFO imposée (synchro tempo)
+        double syncPhase = -1.0;    // >= 0 : phase du LFO (0 … 1) calée sur la position du DAW en début de bloc
         double lfoHold = -1.0;      // >= 0 : LFO figé à cette valeur (tests / mesures)
     };
 
@@ -150,6 +151,11 @@ public:
         const double mixTarget = st.on ? 1.0 : 0.0;
         const double mixStep = 1.0 / (0.008 * fs);
         const double gMaxArg = kPi * 0.49;                             // garde-fou sous Nyquist
+        if (st.syncHz > 0.0 && st.syncPhase >= 0.0)
+        {
+            phase = st.syncPhase - std::floor (st.syncPhase);          // le balayage suit la grille du DAW
+            hz = targetHz;
+        }
 
         for (int i = 0; i < n; ++i)
         {
@@ -201,6 +207,7 @@ public:
     double lfoNormalised() const { return lfoVis; }          // 0 = haut du balayage, 1 = bas
     double sweepHz() const { return fcVis; }
     double currentSpeedHz() const { return hz; }
+    double lfoPhase() const { return phase; }                 // 0 … 1, 0 = début d'un cycle (temps du DAW en synchro)
 
     static constexpr double kGainScript = 1.38, kGainBlock = 1.40;
     static constexpr double kFbSign = -1.0;
