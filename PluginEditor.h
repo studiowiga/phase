@@ -1,0 +1,81 @@
+#pragma once
+#include <juce_gui_basics/juce_gui_basics.h>
+#include <juce_audio_processors/juce_audio_processors.h>
+#include "PluginProcessor.h"
+
+//==============================================================================
+// Géométrie du visuel (pixels de background.jpg : 1520 x 1916, même format que Small Tone / Holyverb)
+namespace art
+{
+constexpr float W = 1520.0f, H = 1916.0f;
+struct Circle { float x, y, r; };
+constexpr Circle knob   { 756.0f, 386.0f, 215.0f };      // potard SPEED (axe de rotation + zone cliquable)
+constexpr float  knobSweep = 2.6180f;                     // ±150° (graduations de la sérigraphie)
+constexpr Circle foot   { 760.0f, 1373.0f, 150.0f };      // footswitch + anneau lumineux
+// calques (position du coin haut-gauche dans le visuel)
+constexpr float ticksX = 471.0f, ticksY = 110.0f;         // graduations orange allumées
+constexpr float footX  = 560.0f, footY  = 1173.0f;        // anneau du footswitch allumé
+constexpr float indexX = 712.0f, indexY = 200.0f;         // index blanc du chapeau (tourne)
+constexpr float markX  = 730.0f, markY  = 172.0f;         // repère sur la jupe du potard (tourne)
+const juce::Rectangle<float> phaseBox { 488.0f, 818.0f, 546.0f, 194.0f };   // cartouche "PHASE" : SCRIPT / BLOCK
+constexpr float statusX = 760.0f, statusY = 1110.0f;      // ligne d'état (zone noire sous "PHASE")
+constexpr float statusCapH = 33.0f;                       // hauteur des capitales (style "SPEED")
+constexpr float statusMaxW = 660.0f;
+}
+
+//==============================================================================
+class Phase90Editor : public juce::AudioProcessorEditor,
+                      private juce::Timer
+{
+public:
+    explicit Phase90Editor (Phase90Processor&);
+    ~Phase90Editor() override;
+
+    void paint (juce::Graphics&) override;
+    void resized() override;
+
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+    void mouseDoubleClick (const juce::MouseEvent&) override;
+    void mouseMove (const juce::MouseEvent&) override;
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+
+private:
+    void timerCallback() override;
+    float scale() const { return (float) getWidth() / art::W; }
+    juce::Point<float> toArt (juce::Point<float> p) const { return p / scale(); }
+    juce::Rectangle<float> toWin (juce::Rectangle<float> r) const { const float s = scale(); return { r.getX() * s, r.getY() * s, r.getWidth() * s, r.getHeight() * s }; }
+    enum class Hit { none, knob, phase, foot };
+    Hit hitAt (juce::Point<float> artPos) const;
+
+    void setParam (const juce::String& id, float plain);
+    void setSpeed (float v01);
+    void flash (const juce::String& text, double seconds = 1.6);
+    juce::String statusText() const;
+    juce::String speedText() const;
+    void showContextMenu();
+    void setWindowHeight (int h);
+    void askUserPresetName (int slot);
+    void rebuildScaledImages();
+    void paintKnobPointer (juce::Graphics&) const;
+    void paintStatusLine (juce::Graphics&) const;
+
+    Phase90Processor& proc;
+    juce::Image background, glowTicks, glowFoot, indexImg, markImg;
+    juce::Image sBackground, sGlowTicks, sGlowFoot;
+    juce::Typeface::Ptr labelFace;
+    float capRatio = 0.72f, capTopRatio = -0.72f;    // capitales : hauteur et haut (y) / hauteur de police
+
+    float tickLevel = 1.0f, footLevel = 1.0f;
+    bool footDown = false;
+    Hit dragging = Hit::none;
+    float dragStartSpeed = 0.0f;
+    juce::Point<float> dragStart;
+    juce::String flashText;
+    double flashUntil = 0.0;
+
+    std::unique_ptr<juce::AlertWindow> nameDialog;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Phase90Editor)
+};
