@@ -371,7 +371,8 @@ void Phase90Editor::mouseDrag (const MouseEvent& e)
 {
     if (dragging != Hit::knob) return;
     const auto d = e.position - dragStart;
-    const float range = 260.0f * scale() * (e.mods.isShiftDown() ? 5.0f : 1.0f);
+    // course complète du potard = 400 px de souris, quelle que soit la taille de la fenêtre (Maj = 4 x plus fin)
+    const float range = 400.0f * (e.mods.isShiftDown() ? 4.0f : 1.0f);
     setSpeed (dragStartSpeed + (d.x - d.y) / range);
 }
 
@@ -392,7 +393,8 @@ void Phase90Editor::mouseWheelMove (const MouseEvent& e, const MouseWheelDetails
 {
     if (hitAt (toArt (e.position)) != Hit::knob) return;
     const float step = (std::abs (w.deltaY) > 1.0e-6f ? w.deltaY : w.deltaX) * (w.isReversed ? -1.0f : 1.0f);
-    setSpeed (proc.getSpeed() + step * (e.mods.isShiftDown() ? 0.02f : 0.08f));
+    // un cran de molette (Windows : 120/256) = 2 % de la course (Maj = 0,5 %)
+    setSpeed (proc.getSpeed() + step * (e.mods.isShiftDown() ? 0.010f : 0.042f));
 }
 
 //==============================================================================
