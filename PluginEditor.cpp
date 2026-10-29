@@ -31,7 +31,9 @@ Phase90Editor::Phase90Editor (Phase90Processor& p)
     setResizeLimits (roundToInt (p9ui::heightDefault * aspect), p9ui::heightDefault,
                      roundToInt (p9ui::heightMax * aspect), p9ui::heightMax);
     getConstrainer()->setFixedAspectRatio (aspect);
+    setOpaque (true);                       // anti-gel : l'hôte ne redessine jamais ce qui est derrière la fenêtre
     setSize (roundToInt (h0 * aspect), h0);
+    rebuildScaledImages();
 
     tickLevel = footLevel = proc.isOn() ? 1.0f : 0.0f;
     startTimerHz (30);                      // 30 i/s suffisent pour des LED et un potard fluides
@@ -43,10 +45,22 @@ Phase90Editor::~Phase90Editor() { stopTimer(); }
 // Anti-gel de la fenêtre (Windows) : JUCE 8 dessine par défaut avec Direct2D (carte graphique).
 // Avec certains pilotes (Intel notamment) la fenêtre du plugin cesse de se rafraîchir alors que
 // le DAW continue de tourner. Le moteur logiciel est stable partout et largement assez rapide ici.
+//
+// Anti-gel v2 (Studio Wiga) :
+//  1. moteur de rendu logiciel forcé sur Windows, appliqué à chaque nouvelle fenêtre hôte (peer)
+//     et revérifié toutes les secondes, jamais en boucle ;
+//  2. aucun calcul lourd dans paint() ni dans resized() : les images redimensionnées (fond, calques lumineux)
+//     sont refaites par le timer seulement, quand la taille est stable ou quand l'échelle d'affichage change
+//     (vérifiée au plus toutes les 250 ms) ;
+//  3. chien de garde : si un redessin demandé n'est pas arrivé au bout de 1,5 s alors que la fenêtre est
+//     visible, le moteur de rendu est réappliqué et toute la fenêtre est redessinée ;
+//  4. côté audio : aucun appel à l'hôte depuis le thread audio (voir PluginProcessor).
 void Phase90Editor::useSoftwareRenderer()
 {
+    auto* peer = getPeer();
+    if (peer != lastPeer) { lastPeer = peer; repaint(); }
    #if JUCE_WINDOWS
-    if (auto* peer = getPeer())
+    if (peer != nullptr)
     {
         int sw = peer->getAvailableRenderingEngines().indexOf ("Software Renderer");
         if (sw < 0) sw = 0;
@@ -61,14 +75,30 @@ void Phase90Editor::parentHierarchyChanged()
     useSoftwareRenderer();
 }
 
+void Phase90Editor::visibilityChanged()
+{
+    useSoftwareRenderer();
+    if (isShowing())
+        repaint();
+}
+
+void Phase90Editor::askRepaint (Rectangle<int> r)
+{
+    if (repaintAskedMs <= 0.0) repaintAskedMs = Time::getMillisecondCounterHiRes();
+    repaint (r);
+}
+
+float Phase90Editor::physicalScale() const
+{
+    return jlimit (1.0f, 4.0f, (float) Component::getApproximateScaleFactorForComponent (this));
+}
+
 void Phase90Editor::resized()
 {
-    const int minW = roundToInt (p9ui::heightDefault * (double) art::W / (double) art::H);
-    // tolérance de 2 px : avec la mise à l'échelle Windows (125 %, 150 %…) l'hôte arrondit les tailles ;
-    // sans marge, les deux se renvoient la fenêtre en boucle
-    if (getHeight() < p9ui::heightDefault - 2 || getWidth() < minW - 2) { setSize (minW, p9ui::heightDefault); return; }
+    // anti-gel : jamais de setSize ici (les limites du constrainer suffisent, sinon boucle avec l'hôte
+    // quand Windows est à 125 / 150 %) ; les images sont refaites par le timer quand la taille est stable
     proc.uiHeight.store (getHeight());
-    rebuildScaledImages();
+    resizeSettle = 4;
 }
 
 void Phase90Editor::setWindowHeight (int h)
@@ -79,7 +109,10 @@ void Phase90Editor::setWindowHeight (int h)
 
 void Phase90Editor::rebuildScaledImages()
 {
-    // images pré-redimensionnées une seule fois (affichage fluide à 60 i/s)
+    // images pré-redimensionnées une seule fois (affichage fluide) ; appelé par le timer seulement
+    if (getWidth() <= 0 || getHeight() <= 0) return;
+    cacheW = getWidth(); cacheH = getHeight();
+    if (cacheScale <= 0.0f) cacheScale = physicalScale();
     const float s = scale();
     auto rs = [s] (const Image& im) -> Image
     {
@@ -89,6 +122,7 @@ void Phase90Editor::rebuildScaledImages()
     };
     if (background.isValid()) sBackground = background.rescaled (getWidth(), getHeight(), Graphics::highResamplingQuality);
     sGlowTicks = rs (glowTicks); sGlowFoot = rs (glowFoot);
+    repaint();
 }
 
 //==============================================================================
@@ -189,11 +223,32 @@ void Phase90Editor::timerCallback()
         flash (String (learned == 0 ? "FOOTSWITCH" : learned == 1 ? "SPEED" : learned == 2 ? "SCRIPT/BLOCK" : "SYNC") + " = CC " + String (cc), 2.0);
     }
 
-    useSoftwareRenderer();   // au cas où la fenêtre a été recréée par l'hôte (changement d'écran, d'échelle…)
+    // au cas où la fenêtre a été recréée par l'hôte (changement d'écran, d'échelle…) : au plus 1 fois par seconde
+    const double nowMs = Time::getMillisecondCounterHiRes();
+    if (getPeer() != lastPeer || nowMs - lastRendererCheckMs > 1000.0) { lastRendererCheckMs = nowMs; useSoftwareRenderer(); }
+
+    // caches : refaits ici seulement (jamais dans paint ni resized)
+    if (resizeSettle > 0 && --resizeSettle == 0)
+        rebuildScaledImages();
+    else if (resizeSettle == 0 && nowMs - lastScaleCheckMs > 250.0)
+    {
+        lastScaleCheckMs = nowMs;
+        const float sc = physicalScale();
+        if (std::abs (sc - cacheScale) > 0.01f) { cacheScale = sc; rebuildScaledImages(); }
+    }
+
+    // chien de garde : un redessin demandé n'arrive pas -> on relance le moteur de rendu et on redessine tout
+    if (repaintAskedMs > 0.0 && isShowing() && nowMs - repaintAskedMs > 1500.0 && lastPaintMs < repaintAskedMs)
+    {
+        repaintAskedMs = 0.0;
+        lastPeer = nullptr;
+        useSoftwareRenderer();
+        repaint();
+    }
 
     // on ne redessine une zone que si ce qu'elle affiche a vraiment changé (zéro travail au repos)
     auto changed = [] (float& drawn, float now, float eps) { if (std::abs (drawn - now) < eps) return false; drawn = now; return true; };
-    auto zone = [this] (juce::Rectangle<float> r) { repaint (toWin (r).toNearestInt().expanded (2)); };
+    auto zone = [this] (juce::Rectangle<float> r) { askRepaint (toWin (r).toNearestInt().expanded (2)); };
 
     // graduations + potard (le potard est entièrement dans la zone des graduations)
     const bool tickChanged  = changed (drawnTick, tickLevel, 0.002f);
@@ -228,21 +283,30 @@ void Phase90Editor::timerCallback()
 //==============================================================================
 void Phase90Editor::paint (Graphics& g)
 {
+    lastPaintMs = Time::getMillisecondCounterHiRes();
+    repaintAskedMs = 0.0;
     g.fillAll (Colour (7, 7, 7));
-    if (sBackground.isValid()) g.drawImageAt (sBackground, 0, 0);
     const float s = scale();
+    // anti-gel : aucun rescale ici ; on dessine les caches existants, ou les images d'origine
+    // (simple mise à l'échelle au dessin) le temps que le timer refasse les caches après un redimensionnement
+    const bool cacheOk = cacheW == getWidth() && cacheH == getHeight();
+    if (cacheOk && sBackground.isValid()) g.drawImageAt (sBackground, 0, 0);
+    else if (background.isValid())        g.drawImage (background, getLocalBounds().toFloat());
 
-    auto drawOverlay = [&] (const Image& im, float x, float y, float alpha)
+    auto drawOverlay = [&] (const Image& scaledIm, const Image& orig, float x, float y, float alpha)
     {
-        if (alpha <= 0.003f || ! im.isValid()) return;
+        if (alpha <= 0.003f) return;
         g.setOpacity (jlimit (0.0f, 1.0f, alpha));
-        g.drawImageAt (im, roundToInt (x * s), roundToInt (y * s));
+        if (cacheOk && scaledIm.isValid())
+            g.drawImageAt (scaledIm, roundToInt (x * s), roundToInt (y * s));
+        else if (orig.isValid())
+            g.drawImageTransformed (orig, AffineTransform::scale (s).translated (roundToInt (x * s), roundToInt (y * s)));
         g.setOpacity (1.0f);
     };
 
     // lumières (calques allumés du visuel, fondus selon l'état)
-    drawOverlay (sGlowTicks, art::ticksX, art::ticksY, tickLevel);
-    drawOverlay (sGlowFoot, art::footX, art::footY, footLevel);
+    drawOverlay (sGlowTicks, glowTicks, art::ticksX, art::ticksY, tickLevel);
+    drawOverlay (sGlowFoot, glowFoot, art::footX, art::footY, footLevel);
 
     // footswitch enfoncé : le chapeau descend légèrement dans l'ombre
     if (footDown)

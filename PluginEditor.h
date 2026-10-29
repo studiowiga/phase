@@ -37,6 +37,7 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
     void parentHierarchyChanged() override;
+    void visibilityChanged() override;
 
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
@@ -74,6 +75,14 @@ private:
     Phase90Processor& proc;
     juce::Image background, glowTicks, glowFoot, indexImg, markImg;
     juce::Image sBackground, sGlowTicks, sGlowFoot;
+    // anti-gel v2 : caches refaits par le timer seulement, suivi de la fenêtre hôte et des redessins
+    int cacheW = 0, cacheH = 0;
+    float cacheScale = 0.0f;
+    int resizeSettle = 0;
+    void* lastPeer = nullptr;
+    double lastPaintMs = 0.0, repaintAskedMs = 0.0, lastScaleCheckMs = 0.0, lastRendererCheckMs = 0.0;
+    float physicalScale() const;
+    void askRepaint (juce::Rectangle<int> r);
     juce::Typeface::Ptr labelFace;
     float capRatio = 0.72f, capTopRatio = -0.72f;    // capitales : hauteur et haut (y) / hauteur de police
 

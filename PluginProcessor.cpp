@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include <cstring>
 
 using namespace juce;
 
@@ -53,9 +54,18 @@ Phase90Processor::Phase90Processor()
       apvts (*this, nullptr, "Phase90State", createLayout())
 {
     presetName = factoryPresets()[0].name;
+    rSpeed = apvts.getRawParameterValue ("speed");
+    rBlock = apvts.getRawParameterValue ("block");
+    rOn = apvts.getRawParameterValue ("on");
+    rSyncDiv = apvts.getRawParameterValue ("syncdiv");
+    rStereo = apvts.getRawParameterValue ("stereo");
+    rMidiChan = apvts.getRawParameterValue ("midichan");
+    rCcMomentary = apvts.getRawParameterValue ("ccmomentary");
+    for (int i = 0; i < numQueued; ++i) { pendingValue[i].store (0.0f); pendingSet[i].store (false); }
+    startTimerHz (60);
 }
 
-Phase90Processor::~Phase90Processor() { cancelPendingUpdate(); }
+Phase90Processor::~Phase90Processor() { stopTimer(); }
 
 bool Phase90Processor::isBusesLayoutSupported (const BusesLayout& l) const
 {
@@ -94,9 +104,8 @@ void Phase90Processor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& mid
     for (int c = inCh; c < outCh; ++c) buffer.copyFrom (c, 0, buffer, 0, 0, n);   // mono -> stéréo
 
     // ---- MIDI : learn, CC, program change
-    const int chan = (int) apvts.getRawParameterValue ("midichan")->load();
-    const bool momentary = apvts.getRawParameterValue ("ccmomentary")->load() > 0.5f;
-    bool triggerUi = false;
+    const int chan = (int) rMidiChan->load (std::memory_order_relaxed);
+    const bool momentary = rCcMomentary->load (std::memory_order_relaxed) > 0.5f;
     for (const auto m : midi)
     {
         const auto msg = m.getMessage();
@@ -108,32 +117,32 @@ void Phase90Processor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& mid
             if (lt >= 0)
             {
                 (lt == 0 ? ccFoot : lt == 1 ? ccSpeed : lt == 2 ? ccVoice : ccSync).store (cc);
-                lastLearned.store (lt); learnTarget.store (-1); triggerUi = true;
+                lastLearned.store (lt); learnTarget.store (-1);
                 continue;
             }
             if (cc == ccFoot.load())
             {
                 const bool high = v >= 64;
-                if (momentary) { if (high && ! footCcWasHigh) { pendingFootToggle.fetch_add (1); triggerUi = true; } }
-                else { pendingFootSet.store (high ? 1 : 0); triggerUi = true; }
+                // bascule : on part de la valeur deja en file si elle existe, sinon de la valeur courante
+                if (momentary) { if (high && ! footCcWasHigh) setParamFromAudio ("on", queuedOrCurrent ("on", rOn) > 0.5f ? 0.0f : 1.0f); }
+                else setParamFromAudio ("on", high ? 1.0f : 0.0f);
                 footCcWasHigh = high;
             }
-            if (cc == ccSpeed.load()) { pendingSpeed.store (v / 127.0f); triggerUi = true; }
-            if (cc == ccVoice.load()) { pendingVoice.store (v >= 64 ? 1 : 0); triggerUi = true; }
+            if (cc == ccSpeed.load()) { setParamFromAudio ("speed", v / 127.0f); pendingPresetClear.store (true); }
+            if (cc == ccVoice.load()) { setParamFromAudio ("block", v >= 64 ? 1.0f : 0.0f); pendingPresetClear.store (true); }
             if (cc == ccSync.load())                             // chaque appui = état suivant (comme un clic)
             {
                 const bool high = v >= 64;
-                if (high && ! syncCcWasHigh) { pendingSyncStep.fetch_add (1); triggerUi = true; }
+                if (high && ! syncCcWasHigh) pendingSyncStep.fetch_add (1);
                 syncCcWasHigh = high;
             }
         }
         else if (msg.isProgramChange())
         {
-            pendingProgram.store (msg.getProgramChangeNumber()); triggerUi = true;
+            pendingProgram.store (msg.getProgramChangeNumber());
         }
     }
-    midi.clear();
-    if (triggerUi) triggerAsyncUpdate();
+    midi.clear();       // anti-gel v2 : plus de triggerAsyncUpdate() depuis l'audio, le timer vide la file
 
     // ---- tempo et position du DAW
     double bpm = hostBpm.load();
@@ -151,7 +160,7 @@ void Phase90Processor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& mid
     st.speed = getSpeed();
     st.block = isBlock();
     st.on = isOn();
-    st.stereoSpread = apvts.getRawParameterValue ("stereo")->load() > 0.5f;
+    st.stereoSpread = rStereo->load (std::memory_order_relaxed) > 0.5f;
     if (const int sd = syncState(); sd > 0)
     {
         const double beats = syncDivisionBeats (sd);
@@ -178,18 +187,41 @@ void Phase90Processor::setParam (const String& id, float plain)
     }
 }
 
-void Phase90Processor::handleAsyncUpdate()
+// Anti-gel v2 (Studio Wiga) : jamais d'appel a l'hote (setValueNotifyingHost) ni de triggerAsyncUpdate()
+// depuis le thread audio. Le MIDI met la valeur en file ; ce timer (thread de messages, 60 Hz) la transmet.
+const char* Phase90Processor::queuedId (int i)
 {
-    const float r = pendingSpeed.exchange (-1.0f);
-    if (r >= 0.0f) { setParam ("speed", r); presetName = {}; }
-    const int d = pendingVoice.exchange (-1);
-    if (d >= 0) { setParam ("block", (float) d); presetName = {}; }
+    static const char* ids[numQueued] = { "speed", "block", "on" };
+    return ids[jlimit (0, numQueued - 1, i)];
+}
+
+void Phase90Processor::setParamFromAudio (const char* id, float plain)
+{
+    for (int i = 0; i < numQueued; ++i)
+        if (std::strcmp (id, queuedId (i)) == 0)
+        {
+            pendingValue[i].store (plain, std::memory_order_relaxed);
+            pendingSet[i].store (true, std::memory_order_release);
+            return;
+        }
+}
+
+float Phase90Processor::queuedOrCurrent (const char* id, std::atomic<float>* current) const
+{
+    for (int i = 0; i < numQueued; ++i)
+        if (std::strcmp (id, queuedId (i)) == 0 && pendingSet[i].load (std::memory_order_acquire))
+            return pendingValue[i].load (std::memory_order_relaxed);
+    return current->load (std::memory_order_relaxed);
+}
+
+void Phase90Processor::timerCallback()
+{
+    if (pendingPresetClear.exchange (false)) presetName = {};
+    for (int i = 0; i < numQueued; ++i)
+        if (pendingSet[i].exchange (false, std::memory_order_acquire))
+            setParam (queuedId (i), pendingValue[i].load (std::memory_order_relaxed));
     const int ss = pendingSyncStep.exchange (0);
     for (int i = 0; i < ss; ++i) cycleSync();
-    const int fs = pendingFootSet.exchange (-1);
-    if (fs >= 0) setParam ("on", (float) fs);
-    const int ft = pendingFootToggle.exchange (0);
-    if (ft % 2 == 1) setParam ("on", isOn() ? 0.0f : 1.0f);
     const int pg = pendingProgram.exchange (-1);
     if (pg >= 0 && pg < getNumPrograms()) setCurrentProgram (pg);
 }

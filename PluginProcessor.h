@@ -12,7 +12,7 @@ constexpr int heightDefault = 493, height60 = 592, height75 = 740, height100 = 9
 struct FactoryPreset { const char* name; double hz; bool block; int sync; };
 
 class Phase90Processor : public juce::AudioProcessor,
-                         private juce::AsyncUpdater
+                         private juce::Timer
 {
 public:
     Phase90Processor();
@@ -70,24 +70,35 @@ public:
     static juce::String syncDivisionName (int i);
     static double syncDivisionBeats (int i);
     static constexpr int numSyncStates = 4;
-    int syncState() const { return juce::jlimit (0, numSyncStates - 1, (int) apvts.getRawParameterValue ("syncdiv")->load()); }
+    int syncState() const { return juce::jlimit (0, numSyncStates - 1, (int) rSyncDiv->load (std::memory_order_relaxed)); }
     void cycleSync();                         // OFF -> 1/4 -> 1/8 -> 1/2 -> OFF (thread de l'interface)
 
-    bool isOn() const      { return apvts.getRawParameterValue ("on")->load() > 0.5f; }
-    bool isBlock() const   { return apvts.getRawParameterValue ("block")->load() > 0.5f; }
-    float getSpeed() const { return apvts.getRawParameterValue ("speed")->load(); }
+    bool isOn() const      { return rOn->load (std::memory_order_relaxed) > 0.5f; }
+    bool isBlock() const   { return rBlock->load (std::memory_order_relaxed) > 0.5f; }
+    float getSpeed() const { return rSpeed->load (std::memory_order_relaxed); }
     double speedHz() const { return phase90::Engine::speedHz (getSpeed(), isBlock()); }
 
 private:
-    void handleAsyncUpdate() override;
+    // Anti-gel v2 : pointeurs de parametres obtenus une fois (constructeur), aucune recherche par chaine
+    // dans le thread audio ; les changements venant du MIDI sont mis en file et transmis a l'hote par
+    // un timer du thread de messages (60 Hz), jamais depuis le thread audio.
+    std::atomic<float> *rSpeed = nullptr, *rBlock = nullptr, *rOn = nullptr, *rSyncDiv = nullptr,
+                       *rStereo = nullptr, *rMidiChan = nullptr, *rCcMomentary = nullptr;
+    void timerCallback() override;
     void setParam (const juce::String& id, float plainValue);
+    void setParamFromAudio (const char* id, float plain);
+    float queuedOrCurrent (const char* id, std::atomic<float>* current) const;
+    static constexpr int numQueued = 3;
+    static const char* queuedId (int i);
+    std::atomic<float> pendingValue[numQueued];
+    std::atomic<bool>  pendingSet[numQueued];
 
     phase90::Engine engine;
     int currentProgram = 0;
 
-    // changements venant du MIDI (thread audio) appliqués sur le thread de l'interface
-    std::atomic<float> pendingSpeed { -1.0f };
-    std::atomic<int> pendingVoice { -1 }, pendingSyncStep { 0 }, pendingFootToggle { 0 }, pendingFootSet { -1 }, pendingProgram { -1 };
+    // changements venant du MIDI (thread audio) appliqués sur le thread de l'interface (timer)
+    std::atomic<int> pendingSyncStep { 0 }, pendingProgram { -1 };
+    std::atomic<bool> pendingPresetClear { false };   // un CC a modifié le réglage : le nom de preset s'efface
     bool footCcWasHigh = false, syncCcWasHigh = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Phase90Processor)
