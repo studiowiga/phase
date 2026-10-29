@@ -58,3 +58,6 @@ Police Liberation Sans (licence SIL OFL, `OFL-Liberation.txt`).
 
 - v1.3.0 : MIDI Learn au clic droit sur chaque commande (potard SPEED, SCRIPT/BLOCK, SYNC, footswitch) + « Clear MIDI » ; menu de taille : 60 % (default), 75 %, 100 %
 - v1.2.0 : anti-gel v2 (JUCE 8.0.15, caches refaits par le timer, chien de garde, aucun appel à l'hôte depuis le thread audio)
+
+## Notice
+- `docs/Phase90_Manual_EN-FR_v1.3.0.pdf` (anglais puis français). Générateur : `python3 tools/manual.py <sortie.pdf>` (textes dans `tools/manual_text.py`, illustrations dans `tools/manual/`).
