@@ -65,7 +65,7 @@ private:
     void paintText (juce::Graphics&, const juce::String&, float centreX, float capCentreY, float capH, float maxW, juce::Colour) const;
     juce::String statusText() const;
     juce::String speedText() const;
-    void showContextMenu();
+    void showContextMenu (Hit hit = Hit::none);
     void setWindowHeight (int h);
     void askUserPresetName (int slot);
     void rebuildScaledImages();

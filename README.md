@@ -3,7 +3,7 @@
 Phaser analogique **VST3** (Windows 64 bits + macOS universel Apple Silicon/Intel) au format pédale simple,
 modélisé composant par composant sur le **MXR Phase 90** : 4 cellules passe-tout à JFET 2N5952,
 LFO triangle (trigger de Schmitt + intégrateur), mélange sec/traité 50/50, résistance de réinjection R28
-(versions *Block*), plus un bouton **SYNC** au tempo du DAW. Version 1.2.0. Même taille de pédale et de fenêtre que **Small Tone** / **Holyverb**.
+(versions *Block*), plus un bouton **SYNC** au tempo du DAW. Version 1.3.0. Même taille de pédale et de fenêtre que **Small Tone** / **Holyverb**.
 
 ## Compiler avec GitHub
 1. Mets **tous les fichiers à la racine du dépôt** (avec le dossier `.github/workflows`).
@@ -56,4 +56,5 @@ Police Liberation Sans (licence SIL OFL, `OFL-Liberation.txt`).
 
 ## Versions
 
+- v1.3.0 : MIDI Learn au clic droit sur chaque commande (potard SPEED, SCRIPT/BLOCK, SYNC, footswitch) + « Clear MIDI » ; menu de taille : 60 % (default), 75 %, 100 %
 - v1.2.0 : anti-gel v2 (JUCE 8.0.15, caches refaits par le timer, chien de garde, aucun appel à l'hôte depuis le thread audio)

@@ -216,6 +216,12 @@ void Phase90Editor::timerCallback()
     }
     lastSpeed = sp; lastBlock = bl; lastOn = onI; lastSync = sd; lastPreset = proc.presetName;
 
+    // MIDI Learn en attente : message affiché tant qu'aucun contrôleur n'a bougé
+    {
+        static const char* const names[] = { "FOOTSWITCH", "SPEED", "SCRIPT / BLOCK", "SYNC" };
+        const int lt = proc.learnTarget.load();
+        if (lt >= 0 && lt <= 3) flash (String ("MIDI LEARN : ") + names[lt] + " - MOVE A PEDAL", 0.3);
+    }
     const int learned = proc.lastLearned.exchange (-1);
     if (learned >= 0)
     {
@@ -452,8 +458,8 @@ void Phase90Editor::mouseMove (const MouseEvent& e)
 
 void Phase90Editor::mouseDown (const MouseEvent& e)
 {
-    if (e.mods.isPopupMenu()) { showContextMenu(); return; }
     const auto h = hitAt (toArt (e.position));
+    if (e.mods.isPopupMenu()) { showContextMenu (h); return; }
     dragging = Hit::none;
     switch (h)
     {
@@ -532,8 +538,14 @@ void Phase90Editor::askUserPresetName (int slot)
     }), false);
 }
 
-void Phase90Editor::showContextMenu()
+void Phase90Editor::showContextMenu (Hit hit)
 {
+    // ---- commande sous la souris : MIDI Learn directement (clic droit sur le potard, un bouton, le footswitch)
+    // 0 foot, 1 speed, 2 script/block, 3 sync (mêmes numéros que learnTarget côté processeur)
+    const int target = hit == Hit::foot ? 0 : hit == Hit::knob ? 1 : hit == Hit::phase ? 2 : hit == Hit::sync ? 3 : -1;
+    static const char* const targetNames[] = { "FOOTSWITCH", "SPEED", "SCRIPT / BLOCK", "SYNC" };
+    auto ccOf = [this] (int t) { return t == 0 ? proc.ccFoot.load() : t == 1 ? proc.ccSpeed.load() : t == 2 ? proc.ccVoice.load() : proc.ccSync.load(); };
+
     PopupMenu factory;
     const auto& fp = Phase90Processor::factoryPresets();
     for (int i = 0; i < (int) fp.size(); ++i)
@@ -549,8 +561,7 @@ void Phase90Editor::showContextMenu()
 
     PopupMenu size;
     const int h = getHeight();
-    size.addItem (401, "Default (" + String (p9ui::heightDefault) + " px)", true, std::abs (h - p9ui::heightDefault) < 8);
-    size.addItem (402, "60 %", true, std::abs (h - p9ui::height60) < 8);
+    size.addItem (401, "60 % (default)", true, std::abs (h - p9ui::heightDefault) < 8);
     size.addItem (403, "75 %", true, std::abs (h - p9ui::height75) < 8);
     size.addItem (404, "100 %", true, std::abs (h - p9ui::height100) < 8);
 
@@ -567,16 +578,17 @@ void Phase90Editor::showContextMenu()
     opt.addItem (502, "Stereo spread (right channel LFO inverted)", true, flag ("stereo"));
     opt.addItem (504, "Speed ring pulses with the LFO", true, flag ("ticklfo"));
 
+    auto ccLabel = [] (int c) { return c >= 0 ? "CC " + String (c) : String ("none"); };
     PopupMenu midi, chan;
     const int ch = (int) proc.apvts.getRawParameterValue ("midichan")->load();
     chan.addItem (600, "Omni", true, ch == 0);
     for (int c = 1; c <= 16; ++c) chan.addItem (600 + c, String (c), true, ch == c);
     midi.addSubMenu ("Channel", chan);
     midi.addSeparator();
-    midi.addItem (701, "Learn: Footswitch (CC " + String (proc.ccFoot.load()) + ")");
-    midi.addItem (702, "Learn: Speed (CC " + String (proc.ccSpeed.load()) + ")");
-    midi.addItem (703, "Learn: Script / Block (CC " + String (proc.ccVoice.load()) + ")");
-    midi.addItem (705, "Learn: Sync button (CC " + String (proc.ccSync.load()) + ")");
+    midi.addItem (701, "Learn: Footswitch (" + ccLabel (proc.ccFoot.load()) + ")");
+    midi.addItem (702, "Learn: Speed (" + ccLabel (proc.ccSpeed.load()) + ")");
+    midi.addItem (703, "Learn: Script / Block (" + ccLabel (proc.ccVoice.load()) + ")");
+    midi.addItem (705, "Learn: Sync button (" + ccLabel (proc.ccSync.load()) + ")");
     midi.addItem (704, "Reset MIDI assignments (CC 80-83)");
     midi.addSeparator();
     const bool mom = flag ("ccmomentary");
@@ -585,6 +597,15 @@ void Phase90Editor::showContextMenu()
     midi.addItem (-1, "Program Change n = factory preset n+1", false, false);
 
     PopupMenu m;
+    if (target >= 0)
+    {
+        const int cc = ccOf (target);
+        m.addSectionHeader (targetNames[target]);
+        if (proc.learnTarget.load() == target) m.addItem (801, "Cancel MIDI Learn");
+        else m.addItem (801, "MIDI Learn  (then move a pedal / press a button)");
+        m.addItem (802, cc >= 0 ? "Clear MIDI  (CC " + String (cc) + ")" : String ("Clear MIDI  (not assigned)"), cc >= 0);
+        m.addSeparator();
+    }
     m.addSectionHeader ("Phase 90 v" JucePlugin_VersionString " - STUDIO WIGA");
     m.addSubMenu ("Factory presets", factory);
     m.addSubMenu ("Load user preset", load);
@@ -595,8 +616,19 @@ void Phase90Editor::showContextMenu()
     m.addSubMenu ("Options", opt);
     m.addSubMenu ("MIDI", midi);
 
-    m.showMenuAsync (PopupMenu::Options().withMousePosition().withTargetComponent (this), [this, flag] (int r)
+    m.showMenuAsync (PopupMenu::Options().withMousePosition().withTargetComponent (this), [this, flag, target] (int r)
     {
+        if (r == 801 && target >= 0)
+        {
+            if (proc.learnTarget.load() == target) { proc.learnTarget.store (-1); flash ("MIDI LEARN CANCELLED", 1.5); }
+            else proc.learnTarget.store (target);
+            repaint(); return;
+        }
+        if (r == 802 && target >= 0)
+        {
+            (target == 0 ? proc.ccFoot : target == 1 ? proc.ccSpeed : target == 2 ? proc.ccVoice : proc.ccSync).store (-1);
+            flash ("MIDI CLEARED", 1.5); repaint(); return;
+        }
         auto toggleFlag = [this] (const char* id) { setParam (id, proc.apvts.getRawParameterValue (id)->load() > 0.5f ? 0.0f : 1.0f); };
         if (r >= 100 && r < 100 + (int) Phase90Processor::factoryPresets().size())
         {
@@ -606,7 +638,6 @@ void Phase90Editor::showContextMenu()
         else if (r > 200 && r < 210) { if (proc.loadUserPreset (r - 200)) flash ("LOADED : " + proc.presetName.toUpperCase()); }
         else if (r > 300 && r < 310) askUserPresetName (r - 300);
         else if (r == 401) setWindowHeight (p9ui::heightDefault);
-        else if (r == 402) setWindowHeight (p9ui::height60);
         else if (r == 403) setWindowHeight (p9ui::height75);
         else if (r == 404) setWindowHeight (p9ui::height100);
         else if (r == 520 || r == 521)
